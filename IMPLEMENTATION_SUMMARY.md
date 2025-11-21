@@ -42,25 +42,6 @@ A single self-contained Python script with no external dependencies (uses only s
 - ISO8601 formatted timestamps in show command
 - **Formatted table in show command** with separators, elapsed time per entry, and total row
 
-## Testing
-
-Multiple test scripts have been created:
-
-1. **`test_tt.sh`** - Basic functionality tests
-2. **`test_time_format.sh`** - Time formatting verification
-3. **`test_local_db.sh`** - Database path resolution tests
-4. **`test_spaces.sh`** - Task names with spaces tests
-5. **`test_delete.sh`** - Delete command tests
-6. **`test_table_format.sh`** - Table formatting tests
-7. **`test_ls_format.sh`** - New ls checkbox format and -a flag tests
-8. **`demo.sh`** - Comprehensive demonstration of all features
-9. **`demo_spaces.sh`** - Demo of task names with spaces
-10. **`demo_complete.sh`** - Complete feature demonstration including delete
-11. **`demo_final.sh`** - Final demo with improved table formatting
-12. **`demo_ls_format.sh`** - Demo of new list format with checkboxes
-
-All tests pass successfully.
-
 ## Usage
 
 Make the script executable and use it:
