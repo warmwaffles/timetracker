@@ -510,10 +510,17 @@ def main():
     """Main entry point."""
     if len(sys.argv) < 2:
         print("Usage: tt <command> [args]", file=sys.stderr)
-        print(
-            "Commands: start, stop, note, archive, ls, show, cancel, delete",
-            file=sys.stderr,
-        )
+        print("", file=sys.stderr)
+        print("Commands:", file=sys.stderr)
+        print("  start <TASK NAME>    Start tracking a task", file=sys.stderr)
+        print("  stop <TASK NAME>     Stop tracking a task", file=sys.stderr)
+        print("  note <TASK NAME>     Edit task notes in $EDITOR", file=sys.stderr)
+        print("  archive <TASK NAME>  Archive a task (stops if running)", file=sys.stderr)
+        print("  cancel <TASK NAME>   Cancel running task and delete the entry", file=sys.stderr)
+        print("  delete <TASK NAME>   Delete task and all entries permanently", file=sys.stderr)
+        print("  ls                   List all unarchived tasks", file=sys.stderr)
+        print("  ls -a                List all tasks including archived", file=sys.stderr)
+        print("  show <TASK NAME>     Show task details with time entries", file=sys.stderr)
         sys.exit(1)
 
     command = sys.argv[1]
@@ -574,10 +581,17 @@ def main():
 
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
-        print(
-            "Commands: start, stop, note, archive, ls, show, cancel, delete",
-            file=sys.stderr,
-        )
+        print("", file=sys.stderr)
+        print("Commands:", file=sys.stderr)
+        print("  start <TASK NAME>    Start tracking a task", file=sys.stderr)
+        print("  stop <TASK NAME>     Stop tracking a task", file=sys.stderr)
+        print("  note <TASK NAME>     Edit task notes in $EDITOR", file=sys.stderr)
+        print("  archive <TASK NAME>  Archive a task (stops if running)", file=sys.stderr)
+        print("  cancel <TASK NAME>   Cancel running task and delete the entry", file=sys.stderr)
+        print("  delete <TASK NAME>   Delete task and all entries permanently", file=sys.stderr)
+        print("  ls                   List all unarchived tasks", file=sys.stderr)
+        print("  ls -a                List all tasks including archived", file=sys.stderr)
+        print("  show <TASK NAME>     Show task details with time entries", file=sys.stderr)
         sys.exit(1)
 
 
