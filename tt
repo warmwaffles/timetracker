@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+
+import sqlite3
+import sys
+import os
+import time
+import tempfile
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+
+def find_database_path():
+    """
+    Find the database path following the specification:
+    1. Look for .timetracker directory walking up from current directory
+    2. Fall back to $XDG_HOME/.local/state/timetracker/database.db
+    """
+    # First, check for .timetracker directory in current or parent directories
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        timetracker_dir = parent / ".timetracker"
+        if timetracker_dir.is_dir():
+            return timetracker_dir / "database.db"
+
+    # Fall back to XDG_HOME
+    xdg_home = os.environ.get("XDG_HOME") or os.path.expanduser("~")
+    db_dir = Path(xdg_home) / ".local" / "state" / "timetracker"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return db_dir / "database.db"
+
+
+def init_database(db_path):
+    """Initialize database schema if it doesn't exist."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Create tasks table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            notes TEXT,
+            archived BOOLEAN DEFAULT 0
+        )
+    """)
+
+    # Create entries table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            task_id INTEGER NOT NULL,
+            start_at INTEGER NOT NULL,
+            stop_at INTEGER,
+            FOREIGN KEY (task_id) REFERENCES tasks(id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def get_connection():
+    """Get a database connection."""
+    db_path = find_database_path()
+    init_database(db_path)
+    return sqlite3.connect(db_path)
+
+
+def start_task(task_name):
+    """Start a task - upsert task and create entry if not running."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Upsert task
+    cursor.execute(
+        """
+        INSERT INTO tasks (name, archived)
+        VALUES (?, 0)
+        ON CONFLICT(name) DO NOTHING
+    """,
+        (task_name,),
+    )
+
+    # Get task_id
+    cursor.execute("SELECT id FROM tasks WHERE name = ?", (task_name,))
+    task_id = cursor.fetchone()[0]
+
+    # Check if already running
+    cursor.execute(
+        """
+        SELECT id FROM entries
+        WHERE task_id = ? AND stop_at IS NULL
+    """,
+        (task_id,),
+    )
+
+    if cursor.fetchone() is not None:
+        # Already running - no-op
+        conn.close()
+        return
+
+    # Start new entry
+    current_time = int(time.time())
+    cursor.execute(
+        """
+        INSERT INTO entries (task_id, start_at)
+        VALUES (?, ?)
+    """,
+        (task_id, current_time),
+    )
+
+    conn.commit()
+    conn.close()
+    print(f"Started task: {task_name}")
+
+
+def stop_task(task_name):
+    """Stop a running task."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get task_id
+    cursor.execute("SELECT id FROM tasks WHERE name = ?", (task_name,))
+    result = cursor.fetchone()
+
+    if result is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    task_id = result[0]
+
+    # Find running entry
+    cursor.execute(
+        """
+        SELECT id FROM entries
+        WHERE task_id = ? AND stop_at IS NULL
+    """,
+        (task_id,),
+    )
+
+    entry = cursor.fetchone()
+    if entry is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' is not running", file=sys.stderr)
+        sys.exit(1)
+
+    # Stop the entry
+    current_time = int(time.time())
+    cursor.execute(
+        """
+        UPDATE entries
+        SET stop_at = ?
+        WHERE id = ?
+    """,
+        (current_time, entry[0]),
+    )
+
+    conn.commit()
+    conn.close()
+    print(f"Stopped task: {task_name}")
+
+
+def note_task(task_name):
+    """Edit notes for a task."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get task
+    cursor.execute("SELECT id, notes FROM tasks WHERE name = ?", (task_name,))
+    result = cursor.fetchone()
+
+    if result is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    task_id, current_notes = result
+
+    # Create temp file with current notes
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+        temp_path = tf.name
+        if current_notes:
+            tf.write(current_notes)
+
+    try:
+        # Open in editor
+        editor = os.environ.get("EDITOR", "vi")
+        subprocess.run([editor, temp_path], check=True)
+
+        # Read updated notes
+        with open(temp_path, "r") as f:
+            new_notes = f.read()
+
+        # Update database
+        cursor.execute(
+            """
+            UPDATE tasks
+            SET notes = ?
+            WHERE id = ?
+        """,
+            (new_notes, task_id),
+        )
+
+        conn.commit()
+        print(f"Updated notes for task: {task_name}")
+    finally:
+        # Clean up temp file
+        os.unlink(temp_path)
+        conn.close()
+
+
+def archive_task(task_name):
+    """Archive a task and stop it if running."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get task_id
+    cursor.execute("SELECT id FROM tasks WHERE name = ?", (task_name,))
+    result = cursor.fetchone()
+
+    if result is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    task_id = result[0]
+
+    # Stop running entry if exists
+    current_time = int(time.time())
+    cursor.execute(
+        """
+        UPDATE entries
+        SET stop_at = ?
+        WHERE task_id = ? AND stop_at IS NULL
+    """,
+        (current_time, task_id),
+    )
+
+    # Archive task
+    cursor.execute(
+        """
+        UPDATE tasks
+        SET archived = 1
+        WHERE id = ?
+    """,
+        (task_id,),
+    )
+
+    conn.commit()
+    conn.close()
+    print(f"Archived task: {task_name}")
+
+
+def format_duration(seconds):
+    """Format duration in seconds to 'Xhr Ym' format."""
+    if seconds < 60:
+        return "0m"
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+
+    if hours > 0:
+        return f"{hours}hr {minutes}m"
+    else:
+        return f"{minutes}m"
+
+
+def list_tasks(show_all=False):
+    """List tasks. If show_all is True, include archived tasks."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get tasks based on show_all flag
+    if show_all:
+        cursor.execute("""
+            SELECT id, name, archived FROM tasks
+            ORDER BY name ASC
+        """)
+    else:
+        cursor.execute("""
+            SELECT id, name, archived FROM tasks
+            WHERE archived = 0
+            ORDER BY name ASC
+        """)
+
+    tasks = cursor.fetchall()
+
+    if not tasks:
+        conn.close()
+        return
+
+    for task_id, task_name, is_archived in tasks:
+        # Check if running
+        cursor.execute(
+            """
+            SELECT id FROM entries
+            WHERE task_id = ? AND stop_at IS NULL
+        """,
+            (task_id,),
+        )
+        is_running = cursor.fetchone() is not None
+
+        # Calculate total time spent
+        cursor.execute(
+            """
+            SELECT start_at, stop_at FROM entries
+            WHERE task_id = ?
+        """,
+            (task_id,),
+        )
+
+        total_seconds = 0
+        for start_at, stop_at in cursor.fetchall():
+            if stop_at is None:
+                # Still running
+                total_seconds += int(time.time()) - start_at
+            else:
+                total_seconds += stop_at - start_at
+
+        # Format output with new checkbox style
+        if is_archived:
+            marker = "x"
+        elif is_running:
+            marker = "~"
+        else:
+            marker = " "
+
+        time_str = format_duration(total_seconds)
+        print(f"[{marker}] {task_name} --- {time_str}")
+
+    conn.close()
+
+
+def show_task(task_name):
+    """Show details about a task."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get task
+    cursor.execute("SELECT id, notes FROM tasks WHERE name = ?", (task_name,))
+    result = cursor.fetchone()
+
+    if result is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    task_id, notes = result
+
+    # Check if running
+    cursor.execute(
+        """
+        SELECT id FROM entries
+        WHERE task_id = ? AND stop_at IS NULL
+    """,
+        (task_id,),
+    )
+    is_running = cursor.fetchone() is not None
+
+    # Print header
+    running_text = " *running*" if is_running else ""
+    print(f"{task_name}{running_text}")
+    print()
+
+    # Print notes if present
+    if notes and notes.strip():
+        print(notes)
+        print()
+
+    # Calculate total time
+    cursor.execute(
+        """
+        SELECT start_at, stop_at FROM entries
+        WHERE task_id = ?
+        ORDER BY start_at ASC
+    """,
+        (task_id,),
+    )
+
+    entries = cursor.fetchall()
+    total_seconds = 0
+
+    for start_at, stop_at in entries:
+        if stop_at is None:
+            total_seconds += int(time.time()) - start_at
+        else:
+            total_seconds += stop_at - start_at
+
+    # Print entries table
+    if entries:
+        print("| Start At            | Stop At             | Elapsed |")
+        print("| ------------------- | ------------------- | ------- |")
+
+        for start_at, stop_at in entries:
+            start_str = datetime.fromtimestamp(start_at).strftime("%Y-%m-%d %H:%M:%S")
+            stop_str = (
+                datetime.fromtimestamp(stop_at).strftime("%Y-%m-%d %H:%M:%S")
+                if stop_at
+                else ""
+            )
+
+            # Calculate elapsed time for this entry
+            if stop_at is None:
+                elapsed_seconds = int(time.time()) - start_at
+            else:
+                elapsed_seconds = stop_at - start_at
+
+            elapsed_str = format_duration(elapsed_seconds)
+            print(f"| {start_str} | {stop_str:19} | {elapsed_str:7} |")
+
+        # Print total row
+        print(
+            "| Total               |                     | {:<7} |".format(
+                format_duration(total_seconds)
+            )
+        )
+    else:
+        print("No entries yet.")
+
+    conn.close()
+
+
+def cancel_task(task_name):
+    """Cancel running task and delete running entry."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get task_id
+    cursor.execute("SELECT id FROM tasks WHERE name = ?", (task_name,))
+    result = cursor.fetchone()
+
+    if result is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    task_id = result[0]
+
+    # Find running entry
+    cursor.execute(
+        """
+        SELECT id FROM entries
+        WHERE task_id = ? AND stop_at IS NULL
+    """,
+        (task_id,),
+    )
+
+    entry = cursor.fetchone()
+    if entry is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' is not running", file=sys.stderr)
+        sys.exit(1)
+
+    # Delete the running entry
+    cursor.execute(
+        """
+        DELETE FROM entries
+        WHERE id = ?
+    """,
+        (entry[0],),
+    )
+
+    conn.commit()
+    conn.close()
+    print(f"Cancelled task: {task_name}")
+
+
+def delete_task(task_name):
+    """Delete a task and all its entries."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get task_id
+    cursor.execute("SELECT id FROM tasks WHERE name = ?", (task_name,))
+    result = cursor.fetchone()
+
+    if result is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    task_id = result[0]
+
+    # Delete all entries for this task
+    cursor.execute(
+        """
+        DELETE FROM entries
+        WHERE task_id = ?
+    """,
+        (task_id,),
+    )
+
+    # Delete the task
+    cursor.execute(
+        """
+        DELETE FROM tasks
+        WHERE id = ?
+    """,
+        (task_id,),
+    )
+
+    conn.commit()
+    conn.close()
+    print(f"Deleted task: {task_name}")
+
+
+def main():
+    """Main entry point."""
+    if len(sys.argv) < 2:
+        print("Usage: tt <command> [args]", file=sys.stderr)
+        print(
+            "Commands: start, stop, note, archive, ls, show, cancel, delete",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    command = sys.argv[1]
+
+    if command == "start":
+        if len(sys.argv) < 3:
+            print("Usage: tt start <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        start_task(task_name)
+
+    elif command == "stop":
+        if len(sys.argv) < 3:
+            print("Usage: tt stop <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        stop_task(task_name)
+
+    elif command == "note":
+        if len(sys.argv) < 3:
+            print("Usage: tt note <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        note_task(task_name)
+
+    elif command == "archive":
+        if len(sys.argv) < 3:
+            print("Usage: tt archive <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        archive_task(task_name)
+
+    elif command == "ls":
+        # Check for -a flag
+        show_all = len(sys.argv) > 2 and sys.argv[2] == "-a"
+        list_tasks(show_all)
+
+    elif command == "show":
+        if len(sys.argv) < 3:
+            print("Usage: tt show <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        show_task(task_name)
+
+    elif command == "cancel":
+        if len(sys.argv) < 3:
+            print("Usage: tt cancel <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        cancel_task(task_name)
+
+    elif command == "delete":
+        if len(sys.argv) < 3:
+            print("Usage: tt delete <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        delete_task(task_name)
+
+    else:
+        print(f"Unknown command: {command}", file=sys.stderr)
+        print(
+            "Commands: start, stop, note, archive, ls, show, cancel, delete",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
