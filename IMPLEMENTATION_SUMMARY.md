@@ -22,12 +22,13 @@ A single self-contained Python script with no external dependencies (uses only s
 1. **`tt start <TASK NAME>`** - Starts tracking a task
 2. **`tt stop <TASK NAME>`** - Stops tracking a task
 3. **`tt note <TASK NAME>`** - Edit task notes in $EDITOR
-4. **`tt archive <TASK NAME>`** - Archive a task (stops it if running)
-5. **`tt ls`** - List all unarchived tasks with checkbox-style format
-6. **`tt ls -a`** - List ALL tasks including archived ones
-7. **`tt show <TASK NAME>`** - Show task details with entries table
-8. **`tt cancel <TASK NAME>`** - Cancel running task and delete the running entry
-9. **`tt delete <TASK NAME>`** - Delete task and all its entries permanently
+4. **`tt edit <TASK NAME>`** - Edit task name and entries in $EDITOR
+5. **`tt archive <TASK NAME>`** - Archive a task (stops it if running)
+6. **`tt ls`** - List all unarchived tasks with checkbox-style format
+7. **`tt ls -a`** - List ALL tasks including archived ones
+8. **`tt show <TASK NAME>`** - Show task details with entries table
+9. **`tt cancel <TASK NAME>`** - Cancel running task and delete the running entry
+10. **`tt delete <TASK NAME>`** - Delete task and all its entries permanently
 
 ### Key Features
 
@@ -39,6 +40,7 @@ A single self-contained Python script with no external dependencies (uses only s
 - **Checkbox-style list format**: `[ ]` not running, `[~]` running, `[x]` archived
 - **List archived tasks** with `-a` flag
 - Notes editable with $EDITOR environment variable
+- **Interactive entry editing** with structured format in $EDITOR
 - ISO8601 formatted timestamps in show command
 - **Formatted table in show command** with separators, elapsed time per entry, and total row
 
@@ -55,6 +57,7 @@ chmod +x tt
 ./tt ls                          # List unarchived tasks
 ./tt ls -a                       # List ALL tasks (including archived)
 ./tt show Fix login bug
+./tt edit ENG-1234              # Edit task name and entries
 ./tt archive ENG-1234
 ./tt delete Fix login bug
 ```
@@ -74,3 +77,19 @@ sudo ln -s $(pwd)/tt /usr/local/bin/tt
 - Archived tasks are hidden from list view
 - **Delete vs Archive**: `archive` hides tasks from list view but keeps data; `delete` permanently removes tasks and all entries
 - **Cancel vs Delete**: `cancel` removes only the current running entry; `delete` removes the entire task and all its entries
+
+### Edit Command Details
+
+The `edit` command opens a structured file in $EDITOR allowing you to:
+- **Rename tasks** - Edit the first line
+- **Edit entry times** - Modify start/stop times with `edit` or `e` command
+- **Delete entries** - Use `delete` or `d` command
+- **Add new entries** - Use `add` or `a` command
+- **Mark as running** - Use `running` instead of stop time (only last entry)
+
+All changes are validated before committing:
+- Task name conflicts are rejected
+- Only the last entry can be marked "running"
+- Stop times must be after start times
+- Invalid timestamps are rejected
+- All changes are atomic (transaction-based)

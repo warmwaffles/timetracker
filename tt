@@ -506,6 +506,343 @@ def delete_task(task_name):
     print(f"Deleted task: {task_name}")
 
 
+def edit_task(task_name):
+    """Edit a task name and its entries interactively."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get task
+    cursor.execute("SELECT id, name FROM tasks WHERE name = ?", (task_name,))
+    result = cursor.fetchone()
+
+    if result is None:
+        conn.close()
+        print(f"Error: Task '{task_name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    task_id, current_name = result
+
+    # Get all entries for this task
+    cursor.execute(
+        """
+        SELECT id, start_at, stop_at FROM entries
+        WHERE task_id = ?
+        ORDER BY start_at ASC
+    """,
+        (task_id,),
+    )
+    entries = cursor.fetchall()
+
+    # Create temp file with current task and entries
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+        temp_path = tf.name
+
+        # Write task name as first line
+        tf.write(f"{current_name}\n")
+
+        # Write entries
+        for entry_id, start_at, stop_at in entries:
+            start_str = datetime.fromtimestamp(start_at).strftime("%Y-%m-%d %H:%M:%S")
+            if stop_at is None:
+                tf.write(f"edit {entry_id} {start_str} running\n")
+            else:
+                stop_str = datetime.fromtimestamp(stop_at).strftime("%Y-%m-%d %H:%M:%S")
+                tf.write(f"edit {entry_id} {start_str} to {stop_str}\n")
+
+        # Write help text at the bottom
+        tf.write("\n")
+        tf.write("# Commands:\n")
+        tf.write("#   edit <ID> <START> to <STOP>       - Edit an existing entry\n")
+        tf.write("#   edit <ID> <START> running         - Mark entry as running\n")
+        tf.write("#   add <START> to <STOP>             - Add new completed entry\n")
+        tf.write("#   add <START> running               - Add new running entry\n")
+        tf.write("#   delete <ID>                       - Delete an entry\n")
+        tf.write("#\n")
+        tf.write("# Shortcuts: e=edit, a=add, d=delete\n")
+        tf.write("# Only the last entry can be 'running'\n")
+        tf.write("# Times must be in format: YYYY-MM-DD HH:MM:SS\n")
+
+    try:
+        # Open in editor
+        editor = os.environ.get("EDITOR", "vi")
+        subprocess.run([editor, temp_path], check=True)
+
+        # Read edited file
+        with open(temp_path, "r") as f:
+            lines = f.readlines()
+
+        # Parse the edited file
+        if not lines:
+            print("Error: Empty file", file=sys.stderr)
+            conn.close()
+            sys.exit(1)
+
+        new_task_name = lines[0].strip()
+        if not new_task_name:
+            print("Error: Task name cannot be empty", file=sys.stderr)
+            conn.close()
+            sys.exit(1)
+
+        # Parse commands
+        edits = []  # (entry_id, start_timestamp, stop_timestamp_or_none)
+        adds = []  # (start_timestamp, stop_timestamp_or_none)
+        deletes = []  # entry_id
+
+        running_count = 0
+        last_line_running = False
+
+        for line_num, line in enumerate(lines[1:], start=2):
+            line = line.strip()
+
+            # Skip empty lines and comments
+            if not line or line.startswith("#"):
+                continue
+
+            parts = line.split(None, 1)  # Split on first whitespace
+            if not parts:
+                continue
+
+            command = parts[0].lower()
+            rest = parts[1] if len(parts) > 1 else ""
+
+            # Track if this is the last non-comment line
+            is_last_line = True
+            for future_line in lines[line_num:]:
+                future_stripped = future_line.strip()
+                if future_stripped and not future_stripped.startswith("#"):
+                    is_last_line = False
+                    break
+
+            try:
+                if command in ("edit", "e"):
+                    # Parse: edit <ID> <START> to <STOP> OR edit <ID> <START> running
+                    parts = rest.split(None, 4)
+                    if len(parts) < 3:
+                        print(
+                            f"Error: Line {line_num}: Invalid edit format",
+                            file=sys.stderr,
+                        )
+                        conn.close()
+                        sys.exit(1)
+
+                    entry_id = int(parts[0])
+                    start_date = parts[1]
+                    start_time = parts[2]
+                    start_str = f"{start_date} {start_time}"
+
+                    # Parse start timestamp
+                    start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+                    start_ts = int(start_dt.timestamp())
+
+                    if len(parts) >= 4 and parts[3].lower() == "running":
+                        stop_ts = None
+                        running_count += 1
+                        if is_last_line:
+                            last_line_running = True
+                        else:
+                            print(
+                                f"Error: Line {line_num}: Only the last entry can be marked 'running'",
+                                file=sys.stderr,
+                            )
+                            conn.close()
+                            sys.exit(1)
+                    elif len(parts) >= 5 and parts[3].lower() == "to":
+                        stop_date = parts[4].split()[0]
+                        stop_time = (
+                            parts[4].split()[1]
+                            if len(parts[4].split()) > 1
+                            else "00:00:00"
+                        )
+                        stop_str = f"{stop_date} {stop_time}"
+                        stop_dt = datetime.strptime(stop_str, "%Y-%m-%d %H:%M:%S")
+                        stop_ts = int(stop_dt.timestamp())
+
+                        if stop_ts <= start_ts:
+                            print(
+                                f"Error: Line {line_num}: Stop time must be after start time",
+                                file=sys.stderr,
+                            )
+                            conn.close()
+                            sys.exit(1)
+                    else:
+                        print(
+                            f"Error: Line {line_num}: Invalid edit format",
+                            file=sys.stderr,
+                        )
+                        conn.close()
+                        sys.exit(1)
+
+                    edits.append((entry_id, start_ts, stop_ts))
+
+                elif command in ("add", "a"):
+                    # Parse: add <START> to <STOP> OR add <START> running
+                    parts = rest.split(None, 3)
+                    if len(parts) < 3:
+                        print(
+                            f"Error: Line {line_num}: Invalid add format",
+                            file=sys.stderr,
+                        )
+                        conn.close()
+                        sys.exit(1)
+
+                    start_date = parts[0]
+                    start_time = parts[1]
+                    start_str = f"{start_date} {start_time}"
+
+                    # Parse start timestamp
+                    start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+                    start_ts = int(start_dt.timestamp())
+
+                    if parts[2].lower() == "running":
+                        stop_ts = None
+                        running_count += 1
+                        if is_last_line:
+                            last_line_running = True
+                        else:
+                            print(
+                                f"Error: Line {line_num}: Only the last entry can be marked 'running'",
+                                file=sys.stderr,
+                            )
+                            conn.close()
+                            sys.exit(1)
+                    elif parts[2].lower() == "to" and len(parts) >= 4:
+                        stop_date = parts[3].split()[0]
+                        stop_time = (
+                            parts[3].split()[1]
+                            if len(parts[3].split()) > 1
+                            else "00:00:00"
+                        )
+                        stop_str = f"{stop_date} {stop_time}"
+                        stop_dt = datetime.strptime(stop_str, "%Y-%m-%d %H:%M:%S")
+                        stop_ts = int(stop_dt.timestamp())
+
+                        if stop_ts <= start_ts:
+                            print(
+                                f"Error: Line {line_num}: Stop time must be after start time",
+                                file=sys.stderr,
+                            )
+                            conn.close()
+                            sys.exit(1)
+                    else:
+                        print(
+                            f"Error: Line {line_num}: Invalid add format",
+                            file=sys.stderr,
+                        )
+                        conn.close()
+                        sys.exit(1)
+
+                    adds.append((start_ts, stop_ts))
+
+                elif command in ("delete", "d"):
+                    # Parse: delete <ID>
+                    parts = rest.split(None, 1)
+                    if not parts:
+                        print(
+                            f"Error: Line {line_num}: Missing entry ID for delete",
+                            file=sys.stderr,
+                        )
+                        conn.close()
+                        sys.exit(1)
+
+                    entry_id = int(parts[0])
+                    deletes.append(entry_id)
+
+                else:
+                    print(
+                        f"Error: Line {line_num}: Invalid command '{command}'. Use edit, add, or delete.",
+                        file=sys.stderr,
+                    )
+                    conn.close()
+                    sys.exit(1)
+
+            except ValueError as e:
+                print(f"Error: Line {line_num}: Invalid format - {e}", file=sys.stderr)
+                conn.close()
+                sys.exit(1)
+
+        # Validate running count
+        if running_count > 1:
+            print(
+                f"Error: Multiple entries marked 'running' (only one allowed)",
+                file=sys.stderr,
+            )
+            conn.close()
+            sys.exit(1)
+
+        # Check for task name conflict if renamed
+        if new_task_name != current_name:
+            cursor.execute("SELECT id FROM tasks WHERE name = ?", (new_task_name,))
+            if cursor.fetchone() is not None:
+                print(
+                    f"Error: Task name '{new_task_name}' already exists. Cannot rename.",
+                    file=sys.stderr,
+                )
+                conn.close()
+                sys.exit(1)
+
+        # Verify all edit/delete entry IDs exist
+        valid_entry_ids = {e[0] for e in entries}
+        for entry_id, _, _ in edits:
+            if entry_id not in valid_entry_ids:
+                print(f"Error: Entry ID {entry_id} not found", file=sys.stderr)
+                conn.close()
+                sys.exit(1)
+        for entry_id in deletes:
+            if entry_id not in valid_entry_ids:
+                print(f"Error: Entry ID {entry_id} not found", file=sys.stderr)
+                conn.close()
+                sys.exit(1)
+
+        # Everything validated - now execute in transaction
+        try:
+            # Rename task if needed
+            if new_task_name != current_name:
+                cursor.execute(
+                    "UPDATE tasks SET name = ? WHERE id = ?", (new_task_name, task_id)
+                )
+
+            # Process deletes
+            for entry_id in deletes:
+                cursor.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+
+            # Process edits
+            for entry_id, start_ts, stop_ts in edits:
+                cursor.execute(
+                    "UPDATE entries SET start_at = ?, stop_at = ? WHERE id = ?",
+                    (start_ts, stop_ts, entry_id),
+                )
+
+            # Process adds
+            for start_ts, stop_ts in adds:
+                cursor.execute(
+                    "INSERT INTO entries (task_id, start_at, stop_at) VALUES (?, ?, ?)",
+                    (task_id, start_ts, stop_ts),
+                )
+
+            conn.commit()
+
+            # Print summary
+            running_text = f", {running_count} running" if running_count > 0 else ""
+            completed = len(edits) + len(adds) - running_count
+            print(
+                f"Saved {len(edits) + len(adds)} entries ({completed} completed{running_text})"
+            )
+            if len(deletes) > 0:
+                print(f"Deleted {len(deletes)} entries")
+            if new_task_name != current_name:
+                print(f"Renamed task: '{current_name}' → '{new_task_name}'")
+
+        except Exception as e:
+            conn.rollback()
+            print(f"Error: Failed to save changes - {e}", file=sys.stderr)
+            sys.exit(1)
+
+    finally:
+        # Clean up temp file
+        os.unlink(temp_path)
+        conn.close()
+
+
 def main():
     """Main entry point."""
     if len(sys.argv) < 2:
@@ -515,12 +852,29 @@ def main():
         print("  start <TASK NAME>    Start tracking a task", file=sys.stderr)
         print("  stop <TASK NAME>     Stop tracking a task", file=sys.stderr)
         print("  note <TASK NAME>     Edit task notes in $EDITOR", file=sys.stderr)
-        print("  archive <TASK NAME>  Archive a task (stops if running)", file=sys.stderr)
-        print("  cancel <TASK NAME>   Cancel running task and delete the entry", file=sys.stderr)
-        print("  delete <TASK NAME>   Delete task and all entries permanently", file=sys.stderr)
+        print(
+            "  edit <TASK NAME>     Edit task name and entries in $EDITOR",
+            file=sys.stderr,
+        )
+        print(
+            "  archive <TASK NAME>  Archive a task (stops if running)", file=sys.stderr
+        )
+        print(
+            "  cancel <TASK NAME>   Cancel running task and delete the entry",
+            file=sys.stderr,
+        )
+        print(
+            "  delete <TASK NAME>   Delete task and all entries permanently",
+            file=sys.stderr,
+        )
         print("  ls                   List all unarchived tasks", file=sys.stderr)
-        print("  ls -a                List all tasks including archived", file=sys.stderr)
-        print("  show <TASK NAME>     Show task details with time entries", file=sys.stderr)
+        print(
+            "  ls -a                List all tasks including archived", file=sys.stderr
+        )
+        print(
+            "  show <TASK NAME>     Show task details with time entries",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     command = sys.argv[1]
@@ -579,6 +933,13 @@ def main():
         task_name = " ".join(sys.argv[2:])
         delete_task(task_name)
 
+    elif command == "edit":
+        if len(sys.argv) < 3:
+            print("Usage: tt edit <TASK NAME>", file=sys.stderr)
+            sys.exit(1)
+        task_name = " ".join(sys.argv[2:])
+        edit_task(task_name)
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         print("", file=sys.stderr)
@@ -586,12 +947,31 @@ def main():
         print("  start <TASK NAME>    Start tracking a task", file=sys.stderr)
         print("  stop <TASK NAME>     Stop tracking a task", file=sys.stderr)
         print("  note <TASK NAME>     Edit task notes in $EDITOR", file=sys.stderr)
-        print("  archive <TASK NAME>  Archive a task (stops if running)", file=sys.stderr)
-        print("  cancel <TASK NAME>   Cancel running task and delete the entry", file=sys.stderr)
-        print("  delete <TASK NAME>   Delete task and all entries permanently", file=sys.stderr)
-        print("  ls                   List all unarchived tasks", file=sys.stderr)
-        print("  ls -a                List all tasks including archived", file=sys.stderr)
-        print("  show <TASK NAME>     Show task details with time entries", file=sys.stderr)
+        print(
+            "  edit <TASK NAME>     Edit task name and entries in $EDITOR",
+            file=sys.stderr,
+        )
+        print(
+            "  archive <TASK NAME>  Archive a task (stops if running)", file=sys.stderr
+        )
+        print(
+            "  cancel <TASK NAME>   Cancel running task and delete the entry",
+            file=sys.stderr,
+        )
+        print(
+            "  delete <TASK NAME>   Delete task and all entries permanently",
+            file=sys.stderr,
+        )
+        print(
+            "  ls                   List all tasks including archived", file=sys.stderr
+        )
+        print(
+            "  ls -a                List all tasks including archived", file=sys.stderr
+        )
+        print(
+            "  show <TASK NAME>     Show task details with time entries",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
