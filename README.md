@@ -8,6 +8,7 @@
 ./tt start Fix login bug         # Task names can have spaces
 ./tt stop ENG-1234               # Stop a task
 ./tt stop Fix login bug          # Stop task with spaces
+./tt stop all                    # Stop all running tasks
 ```
 
 ### Viewing Tasks

@@ -69,6 +69,14 @@ def get_connection():
 
 def start_task(task_name):
     """Start a task - upsert task and create entry if not running."""
+    # Validate task name is not "all" (reserved for stop all command)
+    if task_name.lower() == "all":
+        print(
+            "Error: Task name 'all' is reserved for 'tt stop all' command",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -160,6 +168,42 @@ def stop_task(task_name):
     conn.commit()
     conn.close()
     print(f"Stopped task: {task_name}")
+
+
+def stop_all_tasks():
+    """Stop all currently running tasks."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Find all running entries
+    cursor.execute("""
+        SELECT t.name, e.id FROM entries e
+        JOIN tasks t ON e.task_id = t.id
+        WHERE e.stop_at IS NULL
+        ORDER BY t.name
+    """)
+
+    running_tasks = cursor.fetchall()
+
+    if not running_tasks:
+        conn.close()
+        print("No running tasks to stop")
+        return
+
+    current_time = int(time.time())
+    stopped_count = 0
+
+    # Stop all running entries
+    for task_name, entry_id in running_tasks:
+        cursor.execute(
+            "UPDATE entries SET stop_at = ? WHERE id = ?", (current_time, entry_id)
+        )
+        print(f"Stopped task: {task_name}")
+        stopped_count += 1
+
+    conn.commit()
+    conn.close()
+    print(f"Stopped {stopped_count} running task(s)")
 
 
 def note_task(task_name):
@@ -850,7 +894,10 @@ def main():
         print("", file=sys.stderr)
         print("Commands:", file=sys.stderr)
         print("  start <TASK NAME>    Start tracking a task", file=sys.stderr)
-        print("  stop <TASK NAME>     Stop tracking a task", file=sys.stderr)
+        print(
+            "  stop <TASK NAME|all> Stop tracking a task (or all tasks)",
+            file=sys.stderr,
+        )
         print("  note <TASK NAME>     Edit task notes in $EDITOR", file=sys.stderr)
         print(
             "  edit <TASK NAME>     Edit task name and entries in $EDITOR",
@@ -888,10 +935,13 @@ def main():
 
     elif command == "stop":
         if len(sys.argv) < 3:
-            print("Usage: tt stop <TASK NAME>", file=sys.stderr)
+            print("Usage: tt stop <TASK NAME|all>", file=sys.stderr)
             sys.exit(1)
         task_name = " ".join(sys.argv[2:])
-        stop_task(task_name)
+        if task_name.lower() == "all":
+            stop_all_tasks()
+        else:
+            stop_task(task_name)
 
     elif command == "note":
         if len(sys.argv) < 3:
@@ -945,7 +995,10 @@ def main():
         print("", file=sys.stderr)
         print("Commands:", file=sys.stderr)
         print("  start <TASK NAME>    Start tracking a task", file=sys.stderr)
-        print("  stop <TASK NAME>     Stop tracking a task", file=sys.stderr)
+        print(
+            "  stop <TASK NAME|all> Stop tracking a task (or all tasks)",
+            file=sys.stderr,
+        )
         print("  note <TASK NAME>     Edit task notes in $EDITOR", file=sys.stderr)
         print(
             "  edit <TASK NAME>     Edit task name and entries in $EDITOR",
